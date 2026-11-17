@@ -101,8 +101,7 @@ export async function GET(req, { params }) {
         <div class="card">
           <div style="font-size: 40px; margin-bottom: 10px;">🔍</div>
           <h2>৪০৪ — লিংক পাওয়া যায়নি</h2>
-          <p>এই QR কোডের (<span class="code-badge">/r/${code}</span>) সাথে কোনো সক্রিয় লিংক যুক্ত নেই অথবা গুগল শিট থেকে তথ্য মুছে ফেলা হয়েছে।</p>
-          <a class="btn" href="/">QR Studio হোমপেজে যান</a>
+          <p>এই QR কোডের (<span class="code-badge">/r/${code}</span>) সাথে কোনো সক্রিয় লিংক যুক্ত নেই অথবা এটি মুছে ফেলা হয়েছে।</p>
         </div>
       </body>
       </html>`,
