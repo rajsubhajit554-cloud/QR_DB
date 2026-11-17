@@ -27,6 +27,9 @@ import {
   Unlock,
   Globe,
   Zap,
+  Eye,
+  EyeOff,
+  LogOut,
 } from "lucide-react";
 
 // Default template project
@@ -62,7 +65,7 @@ const COLOR_PRESETS = [
 ];
 
 export default function QRStudioApp() {
-  const [projects, setProjects] = useState([DEFAULT_PROJECT]);
+  const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState(DEFAULT_PROJECT);
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -75,11 +78,16 @@ export default function QRStudioApp() {
   // QR Mode: 'dynamic' (302 redirect via /r/[code]) OR 'direct' (direct target URL encoded in QR)
   const [qrMode, setQrMode] = useState("dynamic");
 
-  // Authentication & Configuration state
-  const [adminPassword, setAdminPassword] = useState("admin123");
+  // Authentication & Configuration state (STRICT GATE: Locked by default)
+  const [adminPassword, setAdminPassword] = useState("");
+  const [inputPassword, setInputPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [isUnlocked, setIsUnlocked] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+
   const [gasConfigured, setGasConfigured] = useState(false);
-  const [showLoginModal, setShowLoginModal] = useState(false);
   const [showNewModal, setShowNewModal] = useState(false);
   const [showGuideModal, setShowGuideModal] = useState(false);
 
@@ -99,16 +107,47 @@ export default function QRStudioApp() {
   const qrRef = useRef(null);
   const qrCodeInstance = useRef(null);
 
-  // Detect origin on mount
+  // Check saved session on mount
   useEffect(() => {
     if (typeof window !== "undefined") {
       const locOrigin = window.location.origin;
       setOrigin(locOrigin);
+
       const savedPw = sessionStorage.getItem("qr_admin_pw");
       if (savedPw) {
-        setAdminPassword(savedPw);
-        setIsUnlocked(true);
+        // Verify saved session with server
+        fetch("/api/admin", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-admin-password": savedPw,
+          },
+          body: JSON.stringify({ action: "check-auth" }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.ok && data.authenticated) {
+              setAdminPassword(savedPw);
+              setIsUnlocked(true);
+              setGasConfigured(Boolean(data.gasConfigured));
+              fetchProjects(savedPw);
+            } else {
+              sessionStorage.removeItem("qr_admin_pw");
+              setIsUnlocked(false);
+            }
+          })
+          .catch(() => {
+            sessionStorage.removeItem("qr_admin_pw");
+            setIsUnlocked(false);
+          })
+          .finally(() => {
+            setAuthChecking(false);
+          });
+      } else {
+        setAuthChecking(false);
+        setIsUnlocked(false);
       }
+
       const savedDomain = localStorage.getItem("qr_custom_domain");
       if (savedDomain) {
         setCustomDomain(savedDomain);
@@ -118,10 +157,54 @@ export default function QRStudioApp() {
 
   // Compute active base domain for dynamic QR
   const effectiveDomain = (customDomain.trim() || origin || "https://yourapp.vercel.app").replace(/\/$/, "");
-  const dynamicShortUrl = `${effectiveDomain}/r/${selectedProject.code}`;
+  const dynamicShortUrl = `${effectiveDomain}/r/${selectedProject?.code || "demo01"}`;
   
   // The actual text/link encoded inside the QR
-  const encodedQrData = qrMode === "dynamic" ? dynamicShortUrl : (selectedProject.url || "https://google.com");
+  const encodedQrData = qrMode === "dynamic" ? dynamicShortUrl : (selectedProject?.url || "https://google.com");
+
+  // Handle Login submission
+  const handleLoginSubmit = async (e) => {
+    e.preventDefault();
+    if (!inputPassword) return;
+
+    setLoginError("");
+    setLoginLoading(true);
+
+    try {
+      const res = await fetch("/api/admin", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-password": inputPassword,
+        },
+        body: JSON.stringify({ action: "check-auth" }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setAdminPassword(inputPassword);
+        sessionStorage.setItem("qr_admin_pw", inputPassword);
+        setIsUnlocked(true);
+        setGasConfigured(Boolean(data.gasConfigured));
+        fetchProjects(inputPassword);
+      } else {
+        setLoginError("ভুল পাসওয়ার্ড! দয়া করে সঠিক এডমিন পাসওয়ার্ড দিন।");
+      }
+    } catch (err) {
+      setLoginError("সার্ভারের সাথে সংযোগ করা সম্ভব হয়নি।");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  // Handle Logout
+  const handleLogout = () => {
+    sessionStorage.removeItem("qr_admin_pw");
+    setAdminPassword("");
+    setInputPassword("");
+    setIsUnlocked(false);
+    setProjects([]);
+  };
 
   // Fetch projects from Admin API
   const fetchProjects = async (passwordToUse) => {
@@ -147,13 +230,15 @@ export default function QRStudioApp() {
             const found = data.projects.find((p) => p.code === prev?.code);
             return found || data.projects[0];
           });
+        } else {
+          setProjects([DEFAULT_PROJECT]);
+          setSelectedProject(DEFAULT_PROJECT);
         }
       } else if (data.error === "gas_not_configured") {
         setGasConfigured(false);
-        setIsUnlocked(true);
+        setProjects([DEFAULT_PROJECT]);
       } else if (res.status === 401) {
         setIsUnlocked(false);
-        setShowLoginModal(true);
       }
     } catch (err) {
       console.error("Fetch projects error:", err);
@@ -162,19 +247,17 @@ export default function QRStudioApp() {
     }
   };
 
-  useEffect(() => {
-    fetchProjects();
-  }, []);
-
   // Initialize and update qr-code-styling
   useEffect(() => {
+    if (!isUnlocked) return;
+
     let isMounted = true;
 
     async function initQR() {
       if (typeof window === "undefined" || !qrRef.current) return;
 
       const QRCodeStyling = (await import("qr-code-styling")).default;
-      const style = selectedProject.style || DEFAULT_PROJECT.style;
+      const style = selectedProject?.style || DEFAULT_PROJECT.style;
 
       const qrOptions = {
         width: 320,
@@ -225,7 +308,7 @@ export default function QRStudioApp() {
     return () => {
       isMounted = false;
     };
-  }, [selectedProject, encodedQrData]);
+  }, [selectedProject, encodedQrData, isUnlocked]);
 
   // Handle Style updates
   const handleStyleChange = (key, value) => {
@@ -260,7 +343,6 @@ export default function QRStudioApp() {
 
       const data = await res.json();
       if (res.ok && data.ok) {
-        // Update local list
         setProjects((prev) =>
           prev.map((p) => (p.code === selectedProject.code ? { ...selectedProject, updated: new Date().toISOString() } : p))
         );
@@ -351,7 +433,7 @@ export default function QRStudioApp() {
 
       const updated = projects.filter((p) => p.code !== code);
       setProjects(updated);
-      if (selectedProject.code === code) {
+      if (selectedProject?.code === code) {
         setSelectedProject(updated[0] || DEFAULT_PROJECT);
       }
       setStatusMessage({ type: "success", text: "প্রজেক্ট মুছে ফেলা হয়েছে।" });
@@ -409,6 +491,108 @@ export default function QRStudioApp() {
       p.url?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // =========================================================================
+  // 1. LOADING SCREEN DURING INITIAL AUTH CHECK
+  // =========================================================================
+  if (authChecking) {
+    return (
+      <div className="h-screen w-screen bg-[#15152F] flex flex-col items-center justify-center text-white">
+        <div className="w-12 h-12 rounded-2xl bg-white/10 flex items-center justify-center animate-pulse mb-3">
+          <QrCode className="w-6 h-6 text-[#00C2A8]" />
+        </div>
+        <p className="text-xs text-[#A4A4B8]">সুরক্ষা যাচাই করা হচ্ছে...</p>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // 2. STRICT FULL-SCREEN LOCK GATE (Renders ONLY this when !isUnlocked)
+  // =========================================================================
+  if (!isUnlocked) {
+    return (
+      <div className="min-h-screen w-screen bg-[#0E0E1F] flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-[#15152F] rounded-3xl border border-white/10 p-8 shadow-2xl space-y-6 text-center relative overflow-hidden">
+          {/* Subtle glowing background orb */}
+          <div className="absolute -top-20 -left-20 w-44 h-44 bg-[#00C2A8]/20 rounded-full blur-3xl pointer-events-none" />
+          <div className="absolute -bottom-20 -right-20 w-44 h-44 bg-[#FF6B4A]/20 rounded-full blur-3xl pointer-events-none" />
+
+          {/* Logo & Header */}
+          <div className="flex flex-col items-center space-y-2 relative">
+            <div className="w-16 h-16 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center shadow-inner">
+              <Lock className="w-8 h-8 text-[#00C2A8]" />
+            </div>
+            <h1 className="text-xl font-bold text-white tracking-tight pt-2">
+              QR STUDIO <span className="text-[#FF6B4A] text-sm">0.2</span>
+            </h1>
+            <p className="text-xs text-[#A4A4B8] max-w-xs leading-relaxed">
+              এই ড্যাশবোর্ডটি সুরক্ষিত। QR কোড ও ডেটাবেস দেখতে আপনার এডমিন পাসওয়ার্ড দিন।
+            </p>
+          </div>
+
+          {/* Error Message */}
+          {loginError && (
+            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-center justify-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{loginError}</span>
+            </div>
+          )}
+
+          {/* Password Form */}
+          <form onSubmit={handleLoginSubmit} className="space-y-4 text-left relative">
+            <div>
+              <label className="block text-xs font-medium text-[#A4A4B8] mb-1.5">
+                এডমিন পাসওয়ার্ড (Admin Password)
+              </label>
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  autoFocus
+                  required
+                  value={inputPassword}
+                  onChange={(e) => setInputPassword(e.target.value)}
+                  placeholder="পাসওয়ার্ড লিখুন..."
+                  className="w-full px-4 py-3 text-sm bg-white/5 border border-white/15 rounded-xl text-white placeholder-white/30 focus:outline-none focus:border-[#00C2A8] focus:ring-1 focus:ring-[#00C2A8] transition-all"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white transition-colors"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loginLoading}
+              className="w-full py-3 px-4 rounded-xl bg-[#00C2A8] hover:bg-[#00A892] disabled:opacity-50 text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-lg shadow-[#00C2A8]/20 transition-all active:scale-98"
+            >
+              {loginLoading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>যাচাই হচ্ছে...</span>
+                </>
+              ) : (
+                <>
+                  <Unlock className="w-4 h-4 stroke-[2.5]" />
+                  <span>ড্যাশবোর্ড আনলক করুন</span>
+                </>
+              )}
+            </button>
+          </form>
+
+          <div className="pt-2 border-t border-white/5 text-[11px] text-white/30">
+            QR Studio Cloud • Google Apps Script + Vercel
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // 3. UNLOCKED 3-PANEL STUDIO DASHBOARD
+  // =========================================================================
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#FAF8F5] text-[#14141E]">
       {/* Top Bar / Header */}
@@ -455,19 +639,14 @@ export default function QRStudioApp() {
             <span>সেটআপ গাইড</span>
           </button>
 
+          {/* Strict Logout button */}
           <button
-            onClick={() => {
-              if (isUnlocked) {
-                setIsUnlocked(false);
-                sessionStorage.removeItem("qr_admin_pw");
-              } else {
-                setShowLoginModal(true);
-              }
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#15152F] hover:bg-[#1F2044] text-white text-xs font-medium transition-colors shadow-sm"
+            onClick={handleLogout}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FF6B4A]/10 hover:bg-[#FF6B4A]/20 border border-[#FF6B4A]/30 text-[#FF6B4A] text-xs font-semibold transition-colors shadow-xs"
+            title="ড্যাশবোর্ড লক করে বের হন"
           >
-            {isUnlocked ? <Unlock className="w-3.5 h-3.5 text-[#00C2A8]" /> : <Lock className="w-3.5 h-3.5" />}
-            <span>{isUnlocked ? "লক করুন" : "লগইন"}</span>
+            <LogOut className="w-3.5 h-3.5" />
+            <span>লগআউট (লক করুন)</span>
           </button>
         </div>
       </header>
@@ -572,7 +751,7 @@ export default function QRStudioApp() {
           {/* Left panel footer */}
           <div className="p-3 border-t border-[#E8DFD5] bg-white text-[11px] text-[#6C6C82] flex items-center justify-between">
             <span>স্টুডিও v0.2</span>
-            <span>গুগল শিট API</span>
+            <span>সুরক্ষিত ড্যাশবোর্ড</span>
           </div>
         </aside>
 
@@ -644,10 +823,10 @@ export default function QRStudioApp() {
               />
 
               <div className="mt-3 text-center">
-                <div className="font-bold text-sm text-[#15152F]">{selectedProject.name}</div>
+                <div className="font-bold text-sm text-[#15152F]">{selectedProject?.name}</div>
                 <div className="text-xs text-[#6C6C82] flex items-center justify-center gap-1 mt-0.5">
                   <span>গুগল শিট ট্র্যাকিং:</span>
-                  <span className="font-bold text-[#FF6B4A]">{selectedProject.scans || 0} বার স্ক্যান</span>
+                  <span className="font-bold text-[#FF6B4A]">{selectedProject?.scans || 0} বার স্ক্যান</span>
                 </div>
               </div>
             </div>
@@ -706,7 +885,7 @@ export default function QRStudioApp() {
                   <div className="flex items-center justify-between text-[#6C6C82]">
                     <span className="font-semibold text-[#15152F]">স্ক্যান করলে যাবে যেখানে (Target):</span>
                     <a
-                      href={selectedProject.url}
+                      href={selectedProject?.url}
                       target="_blank"
                       rel="noreferrer"
                       className="text-[#00A892] hover:underline flex items-center gap-0.5"
@@ -715,7 +894,7 @@ export default function QRStudioApp() {
                     </a>
                   </div>
                   <div className="font-mono text-[#FF6B4A] truncate font-medium">
-                    {selectedProject.url || "কোনো লিংক সেট করা নেই"}
+                    {selectedProject?.url || "কোনো লিংক সেট করা নেই"}
                   </div>
                 </div>
               )}
@@ -858,7 +1037,7 @@ export default function QRStudioApp() {
                   <label className="block text-xs font-semibold text-[#15152F] mb-1">প্রজেক্ট নাম</label>
                   <input
                     type="text"
-                    value={selectedProject.name || ""}
+                    value={selectedProject?.name || ""}
                     onChange={(e) => setSelectedProject({ ...selectedProject, name: e.target.value })}
                     className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl focus:outline-none focus:border-[#00C2A8]"
                     placeholder="যেমন: রেস্তোরাঁ মেন্যু কার্ড"
@@ -876,7 +1055,7 @@ export default function QRStudioApp() {
                   </div>
                   <textarea
                     rows={3}
-                    value={selectedProject.url || ""}
+                    value={selectedProject?.url || ""}
                     onChange={(e) => setSelectedProject({ ...selectedProject, url: e.target.value })}
                     className="w-full px-3 py-2 text-xs font-mono bg-[#FAF8F5] border-2 border-[#00C2A8] rounded-xl focus:outline-none"
                     placeholder="https://yourwebsite.com/destination"
@@ -898,7 +1077,7 @@ export default function QRStudioApp() {
                     </button>
 
                     <a
-                      href={selectedProject.url}
+                      href={selectedProject?.url}
                       target="_blank"
                       rel="noreferrer"
                       className="p-2 rounded-xl bg-[#15152F] hover:bg-[#1F2044] text-white flex items-center justify-center"
@@ -918,7 +1097,7 @@ export default function QRStudioApp() {
                   <input
                     type="text"
                     readOnly
-                    value={selectedProject.code}
+                    value={selectedProject?.code || ""}
                     className="w-full px-3 py-2 text-xs font-mono font-bold bg-[#F4EFEA] border border-[#E8DFD5] rounded-xl text-[#FF6B4A]"
                   />
                 </div>
@@ -964,7 +1143,7 @@ export default function QRStudioApp() {
                 <div>
                   <label className="block text-xs font-semibold text-[#15152F] mb-1">QR ডটস আকার (Dots Type)</label>
                   <select
-                    value={selectedProject.style?.dotsType || "rounded"}
+                    value={selectedProject?.style?.dotsType || "rounded"}
                     onChange={(e) => handleStyleChange("dotsType", e.target.value)}
                     className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl"
                   >
@@ -983,13 +1162,13 @@ export default function QRStudioApp() {
                   <div className="flex items-center gap-2">
                     <input
                       type="color"
-                      value={selectedProject.style?.dotsColor || "#15152F"}
+                      value={selectedProject?.style?.dotsColor || "#15152F"}
                       onChange={(e) => handleStyleChange("dotsColor", e.target.value)}
                       className="w-10 h-8 rounded-lg cursor-pointer border border-[#E8DFD5] p-0.5 bg-white"
                     />
                     <input
                       type="text"
-                      value={selectedProject.style?.dotsColor || "#15152F"}
+                      value={selectedProject?.style?.dotsColor || "#15152F"}
                       onChange={(e) => handleStyleChange("dotsColor", e.target.value)}
                       className="flex-1 px-3 py-1.5 text-xs font-mono uppercase bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl"
                     />
@@ -1000,7 +1179,7 @@ export default function QRStudioApp() {
                 <div>
                   <label className="block text-xs font-semibold text-[#15152F] mb-1">কর্নার ফ্রেম (Corner Square)</label>
                   <select
-                    value={selectedProject.style?.cornerSquareType || "extra-rounded"}
+                    value={selectedProject?.style?.cornerSquareType || "extra-rounded"}
                     onChange={(e) => handleStyleChange("cornerSquareType", e.target.value)}
                     className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl"
                   >
@@ -1016,13 +1195,13 @@ export default function QRStudioApp() {
                   <div className="flex items-center gap-2">
                     <input
                       type="color"
-                      value={selectedProject.style?.cornerSquareColor || "#FF6B4A"}
+                      value={selectedProject?.style?.cornerSquareColor || "#FF6B4A"}
                       onChange={(e) => handleStyleChange("cornerSquareColor", e.target.value)}
                       className="w-10 h-8 rounded-lg cursor-pointer border border-[#E8DFD5] p-0.5 bg-white"
                     />
                     <input
                       type="text"
-                      value={selectedProject.style?.cornerSquareColor || "#FF6B4A"}
+                      value={selectedProject?.style?.cornerSquareColor || "#FF6B4A"}
                       onChange={(e) => handleStyleChange("cornerSquareColor", e.target.value)}
                       className="flex-1 px-3 py-1.5 text-xs font-mono uppercase bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl"
                     />
@@ -1035,13 +1214,13 @@ export default function QRStudioApp() {
                   <div className="flex items-center gap-2">
                     <input
                       type="color"
-                      value={selectedProject.style?.cornerDotColor || "#00C2A8"}
+                      value={selectedProject?.style?.cornerDotColor || "#00C2A8"}
                       onChange={(e) => handleStyleChange("cornerDotColor", e.target.value)}
                       className="w-10 h-8 rounded-lg cursor-pointer border border-[#E8DFD5] p-0.5 bg-white"
                     />
                     <input
                       type="text"
-                      value={selectedProject.style?.cornerDotColor || "#00C2A8"}
+                      value={selectedProject?.style?.cornerDotColor || "#00C2A8"}
                       onChange={(e) => handleStyleChange("cornerDotColor", e.target.value)}
                       className="flex-1 px-3 py-1.5 text-xs font-mono uppercase bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl"
                     />
@@ -1054,13 +1233,13 @@ export default function QRStudioApp() {
                   <div className="flex items-center gap-2">
                     <input
                       type="color"
-                      value={selectedProject.style?.bgColor || "#FFFFFF"}
+                      value={selectedProject?.style?.bgColor || "#FFFFFF"}
                       onChange={(e) => handleStyleChange("bgColor", e.target.value)}
                       className="w-10 h-8 rounded-lg cursor-pointer border border-[#E8DFD5] p-0.5 bg-white"
                     />
                     <input
                       type="text"
-                      value={selectedProject.style?.bgColor || "#FFFFFF"}
+                      value={selectedProject?.style?.bgColor || "#FFFFFF"}
                       onChange={(e) => handleStyleChange("bgColor", e.target.value)}
                       className="flex-1 px-3 py-1.5 text-xs font-mono uppercase bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl"
                     />
@@ -1082,7 +1261,7 @@ export default function QRStudioApp() {
                   />
                 </div>
 
-                {selectedProject.style?.logoUrl && (
+                {selectedProject?.style?.logoUrl && (
                   <div className="p-3 bg-[#FAF8F5] rounded-xl border border-[#E8DFD5] flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <img
@@ -1104,14 +1283,14 @@ export default function QRStudioApp() {
                 <div>
                   <div className="flex justify-between text-xs font-semibold text-[#15152F] mb-1">
                     <span>লোগো সাইজ</span>
-                    <span>{Math.round((selectedProject.style?.logoSize || 0.25) * 100)}%</span>
+                    <span>{Math.round((selectedProject?.style?.logoSize || 0.25) * 100)}%</span>
                   </div>
                   <input
                     type="range"
                     min="0.1"
                     max="0.4"
                     step="0.05"
-                    value={selectedProject.style?.logoSize || 0.25}
+                    value={selectedProject?.style?.logoSize || 0.25}
                     onChange={(e) => handleStyleChange("logoSize", parseFloat(e.target.value))}
                     className="w-full accent-[#00C2A8]"
                   />
@@ -1120,14 +1299,14 @@ export default function QRStudioApp() {
                 <div>
                   <div className="flex justify-between text-xs font-semibold text-[#15152F] mb-1">
                     <span>QR মার্জিন (Margin)</span>
-                    <span>{selectedProject.style?.margin ?? 10}px</span>
+                    <span>{selectedProject?.style?.margin ?? 10}px</span>
                   </div>
                   <input
                     type="range"
                     min="0"
                     max="30"
                     step="2"
-                    value={selectedProject.style?.margin ?? 10}
+                    value={selectedProject?.style?.margin ?? 10}
                     onChange={(e) => handleStyleChange("margin", parseInt(e.target.value))}
                     className="w-full accent-[#00C2A8]"
                   />
@@ -1227,51 +1406,6 @@ export default function QRStudioApp() {
                   {saving ? "তৈরি হচ্ছে..." : "তৈরি করুন"}
                 </button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* MODAL: Admin Login */}
-      {/* ======================================================== */}
-      {showLoginModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-[#E8DFD5] space-y-4">
-            <div className="flex items-center gap-2">
-              <div className="p-2 rounded-xl bg-[#15152F] text-white">
-                <Shield className="w-5 h-5 text-[#00C2A8]" />
-              </div>
-              <div>
-                <h3 className="font-bold text-sm text-[#15152F]">এডমিন পাসওয়ার্ড</h3>
-                <p className="text-[11px] text-[#6C6C82]">ডাটাবেসে এক্সেসের জন্য পাসওয়ার্ড লিখুন</p>
-              </div>
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                sessionStorage.setItem("qr_admin_pw", adminPassword);
-                setShowLoginModal(false);
-                fetchProjects(adminPassword);
-              }}
-              className="space-y-3"
-            >
-              <input
-                type="password"
-                required
-                value={adminPassword}
-                onChange={(e) => setAdminPassword(e.target.value)}
-                placeholder="এডমিন পাসওয়ার্ড দিন (Default: admin123)"
-                className="w-full px-3 py-2 text-xs bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl focus:outline-none focus:border-[#00C2A8]"
-              />
-
-              <button
-                type="submit"
-                className="w-full py-2 px-4 rounded-xl bg-[#15152F] hover:bg-[#1F2044] text-white font-semibold text-xs shadow-sm"
-              >
-                আনলক করুন
-              </button>
             </form>
           </div>
         </div>
