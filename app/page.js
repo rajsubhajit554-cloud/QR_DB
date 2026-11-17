@@ -25,6 +25,8 @@ import {
   CheckCircle2,
   Lock,
   Unlock,
+  Globe,
+  Zap,
 } from "lucide-react";
 
 // Default template project
@@ -66,8 +68,12 @@ export default function QRStudioApp() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [origin, setOrigin] = useState("");
+  const [customDomain, setCustomDomain] = useState("");
   const [copied, setCopied] = useState(false);
   const [statusMessage, setStatusMessage] = useState(null);
+
+  // QR Mode: 'dynamic' (302 redirect via /r/[code]) OR 'direct' (direct target URL encoded in QR)
+  const [qrMode, setQrMode] = useState("dynamic");
 
   // Authentication & Configuration state
   const [adminPassword, setAdminPassword] = useState("admin123");
@@ -96,14 +102,26 @@ export default function QRStudioApp() {
   // Detect origin on mount
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setOrigin(window.location.origin);
+      const locOrigin = window.location.origin;
+      setOrigin(locOrigin);
       const savedPw = sessionStorage.getItem("qr_admin_pw");
       if (savedPw) {
         setAdminPassword(savedPw);
         setIsUnlocked(true);
       }
+      const savedDomain = localStorage.getItem("qr_custom_domain");
+      if (savedDomain) {
+        setCustomDomain(savedDomain);
+      }
     }
   }, []);
+
+  // Compute active base domain for dynamic QR
+  const effectiveDomain = (customDomain.trim() || origin || "https://yourapp.vercel.app").replace(/\/$/, "");
+  const dynamicShortUrl = `${effectiveDomain}/r/${selectedProject.code}`;
+  
+  // The actual text/link encoded inside the QR
+  const encodedQrData = qrMode === "dynamic" ? dynamicShortUrl : (selectedProject.url || "https://google.com");
 
   // Fetch projects from Admin API
   const fetchProjects = async (passwordToUse) => {
@@ -156,15 +174,13 @@ export default function QRStudioApp() {
       if (typeof window === "undefined" || !qrRef.current) return;
 
       const QRCodeStyling = (await import("qr-code-styling")).default;
-
-      const redirectUrl = `${origin || "https://yourapp.vercel.app"}/r/${selectedProject.code}`;
       const style = selectedProject.style || DEFAULT_PROJECT.style;
 
       const qrOptions = {
         width: 320,
         height: 320,
         type: "canvas",
-        data: redirectUrl,
+        data: encodedQrData,
         image: style.logoUrl || undefined,
         margin: style.margin !== undefined ? style.margin : 10,
         qrOptions: {
@@ -209,7 +225,7 @@ export default function QRStudioApp() {
     return () => {
       isMounted = false;
     };
-  }, [selectedProject, origin]);
+  }, [selectedProject, encodedQrData]);
 
   // Handle Style updates
   const handleStyleChange = (key, value) => {
@@ -248,7 +264,7 @@ export default function QRStudioApp() {
         setProjects((prev) =>
           prev.map((p) => (p.code === selectedProject.code ? { ...selectedProject, updated: new Date().toISOString() } : p))
         );
-        setStatusMessage({ type: "success", text: "সফলভাবে ডাটাবেসে সেভ হয়েছে!" });
+        setStatusMessage({ type: "success", text: "সফলভাবে গুগল শিটে সেভ হয়েছে!" });
       } else {
         setStatusMessage({
           type: "warning",
@@ -302,11 +318,11 @@ export default function QRStudioApp() {
       setNewProjectCode("");
 
       if (res.ok && data.ok) {
-        setStatusMessage({ type: "success", text: `নতুন প্রজেক্ট (${generatedCode}) তৈরি হয়েছে!` });
+        setStatusMessage({ type: "success", text: `নতুন প্রজেক্ট (${generatedCode}) শিটে যুক্ত হয়েছে!` });
       } else {
         setStatusMessage({
           type: "warning",
-          text: data.message || "প্রজেক্ট লোকালভাবে তৈরি হয়েছে। গুগল শিটে সেভ করতে GAS_URL কনফিগার করুন।",
+          text: data.message || "প্রজেক্ট লোকালভাবে তৈরি হয়েছে।",
         });
       }
     } catch (err) {
@@ -344,10 +360,9 @@ export default function QRStudioApp() {
     }
   };
 
-  // Copy Short Link
+  // Copy encoded link
   const handleCopyLink = () => {
-    const fullUrl = `${origin}/r/${selectedProject.code}`;
-    navigator.clipboard.writeText(fullUrl);
+    navigator.clipboard.writeText(encodedQrData);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -356,7 +371,6 @@ export default function QRStudioApp() {
   const handleDownload = async () => {
     if (!qrCodeInstance.current) return;
 
-    // Temporarily update width/height for high-res download
     const currentSize = 320;
     await qrCodeInstance.current.update({
       width: Number(downloadSize),
@@ -409,7 +423,7 @@ export default function QRStudioApp() {
                 QR STUDIO <span className="text-[#FF6B4A] text-sm font-semibold">0.2</span>
               </h1>
               <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-[#E6FAF6] text-[#00A892] border border-[#B3F2E7]">
-                ডাইনামিক Vercel + Google Sheet
+                ডাইনামিক Google Sheet DB
               </span>
             </div>
             <p className="text-[11px] text-[#6C6C82] leading-tight">
@@ -566,7 +580,7 @@ export default function QRStudioApp() {
         {/* PANEL 2 (MIDDLE): Live QR Preview, Test Link, Downloads */}
         {/* ======================================================== */}
         <main className="bg-[#FAF8F5] flex flex-col h-full overflow-y-auto">
-          <div className="max-w-2xl mx-auto w-full p-6 flex flex-col items-center justify-center my-auto space-y-6">
+          <div className="max-w-2xl mx-auto w-full p-6 flex flex-col items-center justify-center my-auto space-y-5">
             {/* Status message alert */}
             {statusMessage && (
               <div
@@ -587,11 +601,40 @@ export default function QRStudioApp() {
               </div>
             )}
 
+            {/* QR Mode Switcher: Dynamic vs Direct */}
+            <div className="w-full max-w-md bg-white p-1.5 rounded-2xl border border-[#E8DFD5] shadow-xs flex gap-1">
+              <button
+                onClick={() => setQrMode("dynamic")}
+                className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                  qrMode === "dynamic"
+                    ? "bg-[#15152F] text-white shadow-sm"
+                    : "text-[#6C6C82] hover:bg-[#FAF8F5]"
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5 text-[#00C2A8]" />
+                <span>ডাইনামিক মোড (স্থায়ী 302)</span>
+              </button>
+
+              <button
+                onClick={() => setQrMode("direct")}
+                className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                  qrMode === "direct"
+                    ? "bg-[#15152F] text-white shadow-sm"
+                    : "text-[#6C6C82] hover:bg-[#FAF8F5]"
+                }`}
+              >
+                <Link2 className="w-3.5 h-3.5 text-[#FF6B4A]" />
+                <span>সরাসরি স্ট্যাটিক লিংক</span>
+              </button>
+            </div>
+
             {/* Main QR Card */}
-            <div className="bg-white p-7 rounded-3xl border border-[#E8DFD5] shadow-xl flex flex-col items-center relative transition-all">
+            <div className="bg-white p-6 rounded-3xl border border-[#E8DFD5] shadow-xl flex flex-col items-center relative transition-all">
               <div className="absolute -top-3 px-3 py-1 rounded-full bg-[#15152F] text-white text-[11px] font-semibold flex items-center gap-1.5 shadow-sm">
                 <Sparkles className="w-3 h-3 text-[#00C2A8]" />
-                <span>লাইভ প্রিভিউ (স্থায়ী QR)</span>
+                <span>
+                  {qrMode === "dynamic" ? "লাইভ ডাইনামিক QR" : "লাইভ সরাসরি লিংক QR"}
+                </span>
               </div>
 
               {/* QR Container Canvas */}
@@ -600,59 +643,118 @@ export default function QRStudioApp() {
                 className="w-[320px] h-[320px] flex items-center justify-center rounded-2xl overflow-hidden bg-white p-2 border border-[#F4EFEA]"
               />
 
-              <div className="mt-4 text-center">
+              <div className="mt-3 text-center">
                 <div className="font-bold text-sm text-[#15152F]">{selectedProject.name}</div>
                 <div className="text-xs text-[#6C6C82] flex items-center justify-center gap-1 mt-0.5">
-                  <span>মোট স্ক্যান:</span>
-                  <span className="font-bold text-[#FF6B4A]">{selectedProject.scans || 0} বার</span>
+                  <span>গুগল শিট ট্র্যাকিং:</span>
+                  <span className="font-bold text-[#FF6B4A]">{selectedProject.scans || 0} বার স্ক্যান</span>
                 </div>
               </div>
             </div>
 
-            {/* Short Link Display & Copy Action */}
-            <div className="w-full max-w-md bg-white p-4 rounded-2xl border border-[#E8DFD5] shadow-sm space-y-2">
-              <div className="flex items-center justify-between text-xs text-[#6C6C82]">
-                <span className="font-semibold text-[#15152F]">QR শর্ট লিংক (স্থায়ী):</span>
-                <span className="text-[11px] text-[#00A892] font-medium">302 ইনস্ট্যান্ট রিডাইরেক্ট</span>
+            {/* Link Preview and Test Card */}
+            <div className="w-full max-w-md bg-white p-4 rounded-2xl border border-[#E8DFD5] shadow-sm space-y-3">
+              {/* Encoded Data */}
+              <div>
+                <div className="flex items-center justify-between text-xs text-[#6C6C82] mb-1">
+                  <span className="font-semibold text-[#15152F]">
+                    {qrMode === "dynamic" ? "QR কোডের ভেতরের রিডাইরেক্ট লিংক:" : "QR কোডের ভেতরের আসল লিংক:"}
+                  </span>
+                  <span className="text-[11px] text-[#00A892] font-semibold">
+                    {qrMode === "dynamic" ? "302 Permanent" : "Direct URL"}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2 bg-[#FAF8F5] p-1.5 pl-3 rounded-xl border border-[#E8DFD5]">
+                  <span className="text-xs font-mono font-medium text-[#15152F] truncate flex-1 select-all">
+                    {encodedQrData}
+                  </span>
+
+                  <button
+                    onClick={handleCopyLink}
+                    className="px-2.5 py-1.5 rounded-lg bg-white border border-[#E8DFD5] hover:bg-[#F4EFEA] text-xs font-medium text-[#15152F] flex items-center gap-1 shadow-sm shrink-0 transition-colors"
+                  >
+                    {copied ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-[#00C2A8]" />
+                        <span className="text-[#00C2A8]">কপি হয়েছে</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5 text-[#6C6C82]" />
+                        <span>কপি</span>
+                      </>
+                    )}
+                  </button>
+
+                  <a
+                    href={encodedQrData}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-2.5 py-1.5 rounded-lg bg-[#00C2A8] hover:bg-[#00A892] text-white text-xs font-semibold flex items-center gap-1 shadow-xs transition-colors shrink-0"
+                    title="লিংক টেস্ট করুন"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>টেস্ট করুন</span>
+                  </a>
+                </div>
               </div>
 
-              <div className="flex items-center gap-2 bg-[#FAF8F5] p-1.5 pl-3 rounded-xl border border-[#E8DFD5]">
-                <span className="text-xs font-mono font-medium text-[#15152F] truncate flex-1 select-all">
-                  {origin ? `${origin}/r/${selectedProject.code}` : `/r/${selectedProject.code}`}
-                </span>
+              {/* Dynamic Target Destination Banner */}
+              {qrMode === "dynamic" && (
+                <div className="p-2.5 bg-[#FAF8F5] rounded-xl border border-[#E8DFD5] text-[11px] space-y-1">
+                  <div className="flex items-center justify-between text-[#6C6C82]">
+                    <span className="font-semibold text-[#15152F]">স্ক্যান করলে যাবে যেখানে (Target):</span>
+                    <a
+                      href={selectedProject.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[#00A892] hover:underline flex items-center gap-0.5"
+                    >
+                      আসল সাইট <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
+                  </div>
+                  <div className="font-mono text-[#FF6B4A] truncate font-medium">
+                    {selectedProject.url || "কোনো লিংক সেট করা নেই"}
+                  </div>
+                </div>
+              )}
 
-                <button
-                  onClick={handleCopyLink}
-                  className="px-3 py-1.5 rounded-lg bg-white border border-[#E8DFD5] hover:bg-[#F4EFEA] text-xs font-medium text-[#15152F] flex items-center gap-1 shadow-sm shrink-0 transition-colors"
-                >
-                  {copied ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-[#00C2A8]" />
-                      <span className="text-[#00C2A8]">কপি হয়েছে</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5 text-[#6C6C82]" />
-                      <span>কপি করুন</span>
-                    </>
-                  )}
-                </button>
-
-                <a
-                  href={`/r/${selectedProject.code}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="p-1.5 rounded-lg bg-[#15152F] hover:bg-[#1F2044] text-white transition-colors"
-                  title="লিংক টেস্ট করুন (নতুন ট্যাবে খুলুন)"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              </div>
-
-              <div className="text-[11px] text-[#6C6C82] flex items-center gap-1 pt-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#00C2A8]" />
-                <span>টার্গেট URL পরিবর্তন করলেও এই QR কোডটি একই থাকবে, প্রিন্ট নষ্ট হবে না।</span>
-              </div>
+              {/* Custom Domain Input for Vercel testing */}
+              {qrMode === "dynamic" && (
+                <div className="pt-2 border-t border-[#F4EFEA] space-y-1">
+                  <div className="flex items-center justify-between text-[11px] text-[#6C6C82]">
+                    <span className="flex items-center gap-1 font-medium text-[#15152F]">
+                      <Globe className="w-3 h-3 text-[#00C2A8]" />
+                      লাইভ Vercel ডোমেইন (ঐচ্ছিক):
+                    </span>
+                    {customDomain && (
+                      <button
+                        onClick={() => {
+                          setCustomDomain("");
+                          localStorage.removeItem("qr_custom_domain");
+                        }}
+                        className="text-[10px] text-[#FF6B4A] hover:underline"
+                      >
+                        রিসেট
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={customDomain}
+                    onChange={(e) => {
+                      setCustomDomain(e.target.value);
+                      localStorage.setItem("qr_custom_domain", e.target.value);
+                    }}
+                    placeholder="যেমন: https://qr-db.vercel.app"
+                    className="w-full px-2.5 py-1 text-xs font-mono bg-[#FAF8F5] border border-[#E8DFD5] rounded-lg focus:outline-none focus:border-[#00C2A8]"
+                  />
+                  <p className="text-[10px] text-[#8B8794]">
+                    লোকালহোস্টে কাজ করার সময় আপনার লাইভ Vercel ডোমেইন বসালে QR কোড স্ক্যান করলে সরাসরি ফোনে কাজ করবে।
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Download Options Toolbar */}
@@ -719,7 +821,7 @@ export default function QRStudioApp() {
               }`}
             >
               <Link2 className="w-3.5 h-3.5" />
-              <span>লিংক</span>
+              <span>টার্গেট লিংক</span>
             </button>
 
             <button
@@ -764,18 +866,50 @@ export default function QRStudioApp() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-[#15152F] mb-1">
-                    আসল টার্গেট লিংক (Target URL)
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold text-[#15152F]">
+                      আসল টার্গেট লিংক (Destination URL)
+                    </label>
+                    <span className="text-[10px] text-[#00A892] font-semibold bg-[#E6FAF6] px-2 py-0.5 rounded-full">
+                      লাইভ এডিটেবল
+                    </span>
+                  </div>
                   <textarea
                     rows={3}
                     value={selectedProject.url || ""}
                     onChange={(e) => setSelectedProject({ ...selectedProject, url: e.target.value })}
-                    className="w-full px-3 py-2 text-xs font-mono bg-[#FAF8F5] border border-[#E8DFD5] rounded-xl focus:outline-none focus:border-[#00C2A8]"
+                    className="w-full px-3 py-2 text-xs font-mono bg-[#FAF8F5] border-2 border-[#00C2A8] rounded-xl focus:outline-none"
                     placeholder="https://yourwebsite.com/destination"
                   />
-                  <p className="text-[11px] text-[#6C6C82] mt-1 leading-normal">
-                    💡 <strong>ম্যাজিক:</strong> যে কোনো সময় এই লিংক পরিবর্তন করতে পারবেন। QR কোড পরিবর্তন হবে না, স্ক্যান করলেই এই নতুন লিংকে যাবে।
+                  
+                  {/* Immediate Save button right below URL */}
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={handleSaveChanges}
+                      disabled={saving}
+                      className="flex-1 py-2 px-3 rounded-xl bg-[#00C2A8] hover:bg-[#00A892] disabled:opacity-50 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all"
+                    >
+                      {saving ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                      )}
+                      <span>লিংক সেভ করুন (Save URL)</span>
+                    </button>
+
+                    <a
+                      href={selectedProject.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="p-2 rounded-xl bg-[#15152F] hover:bg-[#1F2044] text-white flex items-center justify-center"
+                      title="লিংক ওপেন করুন"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                    </a>
+                  </div>
+
+                  <p className="text-[11px] text-[#6C6C82] mt-2 leading-normal bg-[#FAF8F5] p-2.5 rounded-xl border border-[#E8DFD5]">
+                    💡 <strong>ডাইনামিক সুবিধা:</strong> এখানে লিংক পরিবর্তন করে "লিংক সেভ করুন" এ চাপলেই গুগল শিটে আপডেট হয়ে যাবে। আপনার প্রিন্ট করা QR কোড বদলাবে না, কিন্তু স্ক্যান করলে সাথে সাথে এই নতুন লিংকে নিয়ে যাবে!
                   </p>
                 </div>
 
@@ -1010,7 +1144,7 @@ export default function QRStudioApp() {
               className="w-full py-2.5 px-4 rounded-xl bg-[#00C2A8] hover:bg-[#00A892] disabled:opacity-50 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-sm transition-all"
             >
               {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 stroke-[2.5]" />}
-              <span>ডাটাবেসে সেভ করুন</span>
+              <span>সব পরিবর্তন ডাটাবেসে সেভ করুন</span>
             </button>
           </div>
         </aside>

@@ -63,7 +63,27 @@ export async function POST(req) {
       );
     }
 
-    const gasData = await gasRes.json();
+    let gasData = await gasRes.json();
+
+    // If update fails because project doesn't exist yet, automatically create it (Upsert)
+    if (body.action === "update" && gasData?.error === "not_found") {
+      const createRes = await fetch(gasUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8",
+        },
+        body: JSON.stringify({
+          ...body,
+          action: "create",
+          secret: gasSecret,
+        }),
+        redirect: "follow",
+      });
+      if (createRes.ok) {
+        gasData = await createRes.json();
+      }
+    }
+
     return NextResponse.json(gasData);
   } catch (error) {
     console.error("Admin API Error:", error);
