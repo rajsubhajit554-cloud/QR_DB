@@ -114,6 +114,17 @@ export default function QRStudioApp() {
       setOrigin(locOrigin);
 
       const savedPw = sessionStorage.getItem("qr_admin_pw");
+      try {
+        const cached = localStorage.getItem("qr_projects_cache");
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setProjects(parsed);
+            setSelectedProject(parsed[0]);
+          }
+        }
+      } catch (e) {}
+
       if (savedPw) {
         // Verify saved session with server
         fetch("/api/admin", {
@@ -225,11 +236,21 @@ export default function QRStudioApp() {
         setIsUnlocked(true);
         setGasConfigured(true);
         if (data.projects && data.projects.length > 0) {
-          setProjects(data.projects);
+          const merged = data.projects.map((p) => ({
+            ...p,
+            style: {
+              ...DEFAULT_PROJECT.style,
+              ...(p.style || {}),
+            },
+          }));
+          setProjects(merged);
           setSelectedProject((prev) => {
-            const found = data.projects.find((p) => p.code === prev?.code);
-            return found || data.projects[0];
+            const found = merged.find((p) => p.code === prev?.code);
+            return found || merged[0];
           });
+          try {
+            localStorage.setItem("qr_projects_cache", JSON.stringify(merged));
+          } catch (e) {}
         } else {
           setProjects([DEFAULT_PROJECT]);
           setSelectedProject(DEFAULT_PROJECT);
@@ -247,6 +268,49 @@ export default function QRStudioApp() {
     }
   };
 
+  // Helper to build robust QR options with complete styling
+  const getQrOptions = (project, dataToEncode, size = 320) => {
+    const style = {
+      ...DEFAULT_PROJECT.style,
+      ...(project?.style || {}),
+    };
+
+    return {
+      width: size,
+      height: size,
+      type: "canvas",
+      data: dataToEncode || "https://google.com",
+      image: style.logoUrl && String(style.logoUrl).trim() !== "" ? style.logoUrl : undefined,
+      margin: style.margin !== undefined ? Number(style.margin) : 10,
+      qrOptions: {
+        typeNumber: 0,
+        mode: "Byte",
+        errorCorrectionLevel: style.logoUrl ? "H" : "Q",
+      },
+      imageOptions: {
+        hideBackgroundDots: true,
+        imageSize: Number(style.logoSize) || 0.25,
+        margin: 4,
+        crossOrigin: "anonymous",
+      },
+      dotsOptions: {
+        color: style.dotsColor || "#15152F",
+        type: style.dotsType || "rounded",
+      },
+      backgroundOptions: {
+        color: style.bgColor || "#FFFFFF",
+      },
+      cornersSquareOptions: {
+        color: style.cornerSquareColor || style.dotsColor || "#15152F",
+        type: style.cornerSquareType || "extra-rounded",
+      },
+      cornersDotOptions: {
+        color: style.cornerDotColor || style.dotsColor || "#15152F",
+        type: style.cornerDotType || "dot",
+      },
+    };
+  };
+
   // Initialize and update qr-code-styling
   useEffect(() => {
     if (!isUnlocked) return;
@@ -257,47 +321,14 @@ export default function QRStudioApp() {
       if (typeof window === "undefined" || !qrRef.current) return;
 
       const QRCodeStyling = (await import("qr-code-styling")).default;
-      const style = selectedProject?.style || DEFAULT_PROJECT.style;
-
-      const qrOptions = {
-        width: 320,
-        height: 320,
-        type: "canvas",
-        data: encodedQrData,
-        image: style.logoUrl || undefined,
-        margin: style.margin !== undefined ? style.margin : 10,
-        qrOptions: {
-          typeNumber: 0,
-          mode: "Byte",
-          errorCorrectionLevel: style.logoUrl ? "H" : "Q",
-        },
-        imageOptions: {
-          hideBackgroundDots: true,
-          imageSize: style.logoSize || 0.25,
-          margin: 4,
-          crossOrigin: "anonymous",
-        },
-        dotsOptions: {
-          color: style.dotsColor || "#15152F",
-          type: style.dotsType || "rounded",
-        },
-        backgroundOptions: {
-          color: style.bgColor || "#FFFFFF",
-        },
-        cornersSquareOptions: {
-          color: style.cornerSquareColor || style.dotsColor || "#15152F",
-          type: style.cornerSquareType || "extra-rounded",
-        },
-        cornersDotOptions: {
-          color: style.cornerDotColor || style.dotsColor || "#15152F",
-          type: style.cornerDotType || "dot",
-        },
-      };
+      const qrOptions = getQrOptions(selectedProject, encodedQrData, 320);
 
       if (!qrCodeInstance.current) {
         qrCodeInstance.current = new QRCodeStyling(qrOptions);
-        qrRef.current.innerHTML = "";
-        qrCodeInstance.current.append(qrRef.current);
+        if (qrRef.current) {
+          qrRef.current.innerHTML = "";
+          qrCodeInstance.current.append(qrRef.current);
+        }
       } else {
         qrCodeInstance.current.update(qrOptions);
       }
@@ -310,21 +341,79 @@ export default function QRStudioApp() {
     };
   }, [selectedProject, encodedQrData, isUnlocked]);
 
-  // Handle Style updates
+  // Handle Style updates with instant state & local cache sync
   const handleStyleChange = (key, value) => {
-    setSelectedProject((prev) => ({
-      ...prev,
-      style: {
-        ...prev.style,
+    setSelectedProject((prev) => {
+      const updatedStyle = {
+        ...(prev?.style || DEFAULT_PROJECT.style),
         [key]: value,
-      },
-    }));
+      };
+      const updated = {
+        ...prev,
+        style: updatedStyle,
+      };
+
+      setProjects((currentProjects) =>
+        currentProjects.map((p) => (p.code === prev?.code ? { ...p, style: updatedStyle } : p))
+      );
+
+      try {
+        const cached = JSON.parse(localStorage.getItem("qr_projects_cache") || "[]");
+        if (Array.isArray(cached) && cached.length > 0) {
+          const newCache = cached.map((p) => (p.code === prev?.code ? { ...p, style: updatedStyle } : p));
+          localStorage.setItem("qr_projects_cache", JSON.stringify(newCache));
+        }
+      } catch (e) {}
+
+      return updated;
+    });
+  };
+
+  // Apply color presets
+  const applyColorPreset = (preset) => {
+    setSelectedProject((prev) => {
+      const updatedStyle = {
+        ...(prev?.style || DEFAULT_PROJECT.style),
+        dotsColor: preset.dots,
+        cornerSquareColor: preset.corner,
+        cornerDotColor: preset.dot,
+        bgColor: preset.bg,
+      };
+      const updated = {
+        ...prev,
+        style: updatedStyle,
+      };
+
+      setProjects((currentProjects) =>
+        currentProjects.map((p) => (p.code === prev?.code ? { ...p, style: updatedStyle } : p))
+      );
+
+      try {
+        const cached = JSON.parse(localStorage.getItem("qr_projects_cache") || "[]");
+        if (Array.isArray(cached) && cached.length > 0) {
+          const newCache = cached.map((p) => (p.code === prev?.code ? { ...p, style: updatedStyle } : p));
+          localStorage.setItem("qr_projects_cache", JSON.stringify(newCache));
+        }
+      } catch (e) {}
+
+      return updated;
+    });
   };
 
   // Save changes to database
   const handleSaveChanges = async () => {
+    if (!selectedProject) return;
     setSaving(true);
     setStatusMessage(null);
+
+    const projectToSave = {
+      ...selectedProject,
+      style: {
+        ...DEFAULT_PROJECT.style,
+        ...(selectedProject.style || {}),
+      },
+    };
+
     try {
       const res = await fetch("/api/admin", {
         method: "POST",
@@ -334,23 +423,30 @@ export default function QRStudioApp() {
         },
         body: JSON.stringify({
           action: "update",
-          code: selectedProject.code,
-          name: selectedProject.name,
-          url: selectedProject.url,
-          style: selectedProject.style,
+          code: projectToSave.code,
+          name: projectToSave.name,
+          url: projectToSave.url,
+          style: projectToSave.style,
         }),
       });
 
       const data = await res.json();
+      const updatedList = projects.map((p) =>
+        p.code === projectToSave.code ? { ...projectToSave, updated: new Date().toISOString() } : p
+      );
+      setProjects(updatedList);
+      setSelectedProject({ ...projectToSave, updated: new Date().toISOString() });
+
+      try {
+        localStorage.setItem("qr_projects_cache", JSON.stringify(updatedList));
+      } catch (e) {}
+
       if (res.ok && data.ok) {
-        setProjects((prev) =>
-          prev.map((p) => (p.code === selectedProject.code ? { ...selectedProject, updated: new Date().toISOString() } : p))
-        );
-        setStatusMessage({ type: "success", text: "সফলভাবে গুগল শিটে সেভ হয়েছে!" });
+        setStatusMessage({ type: "success", text: "কালার ও সম্পূর্ণ ডিজাইন গুগল শিটে সেভ হয়েছে!" });
       } else {
         setStatusMessage({
           type: "warning",
-          text: data.message || "সেভ করা যায়নি। GAS কানেকশন চেক করুন।",
+          text: data.message || "ব্রাউজারে সেভ হয়েছে, তবে গুগল শিটে কানেক্ট হতে পারেনি।",
         });
       }
     } catch (err) {
@@ -449,26 +545,22 @@ export default function QRStudioApp() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Download QR Code
+  // Download QR Code with complete styling retained
   const handleDownload = async () => {
-    if (!qrCodeInstance.current) return;
+    if (!qrCodeInstance.current || !selectedProject) return;
 
     const currentSize = 320;
-    await qrCodeInstance.current.update({
-      width: Number(downloadSize),
-      height: Number(downloadSize),
-    });
+    const downloadOpts = getQrOptions(selectedProject, encodedQrData, Number(downloadSize));
+    await qrCodeInstance.current.update(downloadOpts);
 
     await qrCodeInstance.current.download({
       name: `${selectedProject.code}_qr_${downloadSize}px`,
       extension: downloadFormat,
     });
 
-    // Restore preview size
-    await qrCodeInstance.current.update({
-      width: currentSize,
-      height: currentSize,
-    });
+    // Restore preview size with complete options so styling never reverts
+    const previewOpts = getQrOptions(selectedProject, encodedQrData, currentSize);
+    await qrCodeInstance.current.update(previewOpts);
   };
 
   // Logo file upload handler
@@ -1109,18 +1201,8 @@ export default function QRStudioApp() {
                     {COLOR_PRESETS.map((p) => (
                       <button
                         key={p.name}
-                        onClick={() => {
-                          setSelectedProject((prev) => ({
-                            ...prev,
-                            style: {
-                              ...prev.style,
-                              dotsColor: p.dots,
-                              cornerSquareColor: p.corner,
-                              cornerDotColor: p.dot,
-                              bgColor: p.bg,
-                            },
-                          }));
-                        }}
+                        onClick={() => applyColorPreset(p)}
+                        type="button"
                         className="p-2 rounded-xl border border-[#E8DFD5] bg-[#FAF8F5] hover:bg-white text-left text-[11px] font-medium flex items-center gap-2 transition-colors"
                       >
                         <div className="flex -space-x-1">
@@ -1139,6 +1221,42 @@ export default function QRStudioApp() {
             {/* TAB 2: QR STYLE & COLORS */}
             {activeTab === "style" && (
               <div className="space-y-4">
+                {/* Presets in Style Tab */}
+                <div>
+                  <label className="block text-xs font-semibold text-[#15152F] mb-1.5">কালার প্রিসেট বেছে নিন</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {COLOR_PRESETS.map((p) => (
+                      <button
+                        key={p.name}
+                        onClick={() => applyColorPreset(p)}
+                        type="button"
+                        className="p-2 rounded-xl border border-[#E8DFD5] bg-[#FAF8F5] hover:bg-white text-left text-[11px] font-medium flex items-center gap-2 transition-colors"
+                      >
+                        <div className="flex -space-x-1">
+                          <span className="w-3.5 h-3.5 rounded-full border border-white" style={{ background: p.dots }} />
+                          <span className="w-3.5 h-3.5 rounded-full border border-white" style={{ background: p.corner }} />
+                          <span className="w-3.5 h-3.5 rounded-full border border-white" style={{ background: p.dot }} />
+                        </div>
+                        <span className="truncate">{p.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Instant Save Style button at top of style options */}
+                <button
+                  onClick={handleSaveChanges}
+                  disabled={saving}
+                  type="button"
+                  className="w-full py-2 px-3 rounded-xl bg-[#00C2A8] hover:bg-[#00A892] disabled:opacity-50 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all"
+                >
+                  {saving ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                  )}
+                  <span>কালার ও স্টাইল সেভ করুন (Save Style)</span>
+                </button>
                 {/* Dots Style */}
                 <div>
                   <label className="block text-xs font-semibold text-[#15152F] mb-1">QR ডটস আকার (Dots Type)</label>
@@ -1245,6 +1363,23 @@ export default function QRStudioApp() {
                     />
                   </div>
                 </div>
+
+                {/* Save Style Button at bottom of tab */}
+                <div className="pt-2">
+                  <button
+                    onClick={handleSaveChanges}
+                    disabled={saving}
+                    type="button"
+                    className="w-full py-2.5 px-3 rounded-xl bg-[#00C2A8] hover:bg-[#00A892] disabled:opacity-50 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all"
+                  >
+                    {saving ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                    )}
+                    <span>কালার ও স্টাইল সেভ করুন (Save Style)</span>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1310,6 +1445,23 @@ export default function QRStudioApp() {
                     onChange={(e) => handleStyleChange("margin", parseInt(e.target.value))}
                     className="w-full accent-[#00C2A8]"
                   />
+                </div>
+
+                {/* Save Logo & Margin button */}
+                <div className="pt-2">
+                  <button
+                    onClick={handleSaveChanges}
+                    disabled={saving}
+                    type="button"
+                    className="w-full py-2.5 px-3 rounded-xl bg-[#00C2A8] hover:bg-[#00A892] disabled:opacity-50 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all"
+                  >
+                    {saving ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                    )}
+                    <span>লোগো ও মার্জিন সেভ করুন (Save Settings)</span>
+                  </button>
                 </div>
               </div>
             )}
